@@ -5,7 +5,23 @@ const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const fmt=t=>new Date(t).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
 function field(el,names){for(const name of names){const attr=Array.from(el.attributes||[]).find(a=>a.name.toLowerCase()===name.toLowerCase());if(attr)return attr.value;const child=Array.from(el.children||[]).find(c=>c.localName.toLowerCase()===name.toLowerCase());if(child)return child.textContent.trim();}return '';}
 function parseXML(xml){const doc=new DOMParser().parseFromString(xml,'application/xml');if(doc.querySelector('parsererror'))throw Error('XML 格式無法解析');const all=Array.from(doc.getElementsByTagName('*'));let result=[];for(const el of all){const name=field(el,['SectionName']);const raw=field(el,['AvgSpd']);if(!name||raw==='')continue;const speed=Number(raw);if(!Number.isFinite(speed)||speed<0)continue;result.push({name,speed,volume:field(el,['TotalVol'])||'—',time:field(el,['ExchangeTime','DataCollectTime'])});}if(!result.length)throw Error('資料未包含有效 SectionName / AvgSpd 路段');const seen=new Set();result=result.filter(r=>{const key=r.name+'|'+r.time;if(seen.has(key))return false;seen.add(key);return true;});const time=all.map(el=>field(el,['ExchangeTime'])).find(Boolean)||result.find(r=>r.time)?.time||'';return {roads:result,time};}
-function stale(){let messages=[];if(sourceTime){const normalized=sourceTime.replace(' ','T');const t=Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(normalized)?normalized:normalized+'+08:00');if(Number.isFinite(t)&&Date.now()-t>1800000)messages.push('資料可能延遲：來源資料時間已超過 30 分鐘。');if(!Number.isFinite(t))messages.push('來源時間格式無法辨識，無法判斷資料是否延遲。');}else if(roads.length)messages.push('來源未提供可辨識的資料時間。');return messages;}
+// Source timestamps without an explicit timezone are Taipei time (UTC+08:00).
+function parseSourceTime(value){
+ const raw=String(value??'').trim();if(!raw)return NaN;
+ const compact=raw.match(/^(\d{4})(\d{2})(\d{2})[ T]?(\d{2})(\d{2})(\d{2})$/);
+ const normal=raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T]+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})?$/i);
+ const m=compact||normal;if(!m)return NaN;
+ const [year,month,day,hour,minute,second]=m.slice(1,7).map(Number);
+ const ms=Number(((normal&&m[7])||'').slice(0,3).padEnd(3,'0'));
+ const local=Date.UTC(year,month-1,day,hour,minute,second,ms),d=new Date(local);
+ if(d.getUTCFullYear()!==year||d.getUTCMonth()!==month-1||d.getUTCDate()!==day||hour>23||minute>59||second>59)return NaN;
+ const zone=(normal&&m[8])||'+08:00';let offset=480;
+ if(zone.toUpperCase()==='Z')offset=0;
+ else {const z=zone.match(/^([+-])(\d{2}):?(\d{2})$/);if(!z||Number(z[2])>23||Number(z[3])>59)return NaN;offset=(z[1]==='-'?-1:1)*(Number(z[2])*60+Number(z[3]));}
+ return local-offset*60000;
+}
+function stale(){let messages=[];if(sourceTime){const t=parseSourceTime(sourceTime);if(Number.isFinite(t)&&Date.now()-t>1800000)messages.push('資料可能延遲：來源資料時間已超過 30 分鐘。');if(!Number.isFinite(t))messages.push('來源時間格式無法辨識，無法判斷資料是否延遲。');}else if(roads.length)messages.push('來源未提供可辨識的資料時間。');return messages;}
+
 function notice(message=''){const texts=[message,...stale()].filter(Boolean);$('notice').hidden=!texts.length;$('notice').textContent=texts.join(' ');}
 function render(){if(!roads.length)return;const sorted=[...roads].sort((a,b)=>a.speed-b.speed);const avg=roads.reduce((s,r)=>s+r.speed,0)/roads.length;$('total').textContent=roads.length.toLocaleString();$('average').textContent=avg.toFixed(1);$('alerts').textContent=roads.filter(r=>r.speed<20).length;$('slowest').textContent=sorted[0].speed.toFixed(1);$('slowname').textContent=sorted[0].name;$('datatime').textContent=sourceTime||'來源未提供';$('fetchtime').textContent=lastFetch?fmt(lastFetch):'—';const top=sorted.slice(0,10),max=Math.max(20,...top.map(r=>r.speed));$('bars').innerHTML=top.map((r,i)=>`<div class="barrow ${r.speed<20?'bad':''}"><span>${String(i+1).padStart(2,'0')}</span><span class="road" title="${esc(r.name)}">${esc(r.name)}</span><div class="track"><div class="fill" style="width:${Math.max(1,r.speed/max*100)}%"></div></div><b>${r.speed.toFixed(0)}</b></div>`).join('');renderRows();renderTrend();}
 function renderRows(){const q=$('search').value.trim().toLowerCase(),only=$('only').checked;let data=roads.filter(r=>r.name.toLowerCase().includes(q)&&(!only||r.speed<20));data.sort($('sort').value==='name'?(a,b)=>a.name.localeCompare(b.name,'zh-Hant'):$('sort').value==='fast'?(a,b)=>b.speed-a.speed:(a,b)=>a.speed-b.speed);$('resultcount').textContent=`${data.length} / ${roads.length} 個路段`;$('rows').innerHTML=data.map((r,i)=>`<tr class="${r.speed<20?'alert':''}"><td>${String(i+1).padStart(2,'0')}</td><td>${esc(r.name)}</td><td>${r.speed.toFixed(1)} <small>km/h</small></td><td>${esc(r.volume)}</td><td><span class="pill ${r.speed<20?'bad':''}">${r.speed<20?'壅塞':r.speed<40?'車多':'順暢'}</span></td></tr>`).join('')||'<tr><td colspan="5" class="empty">沒有符合條件的路段</td></tr>';}
